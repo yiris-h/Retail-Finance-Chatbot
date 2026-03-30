@@ -10,6 +10,9 @@ MODEL_NAME = "gpt-4.1-mini"
 
 st.set_page_config(page_title="Retail Finance Chatbot", layout="wide")
 
+if "show_main_app" not in st.session_state:
+    st.session_state.show_main_app = False
+
 
 # -----------------------------
 # Database setup
@@ -80,7 +83,7 @@ def normalize_budget_df(df):
             "Budget file must include columns: fiscal_year, month, category, amount"
         )
 
-    df = df[list(required)].copy()
+    df = df[["fiscal_year", "month", "category", "amount"]].copy()
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
     df = df.dropna(subset=["amount"])
     df["fiscal_year"] = df["fiscal_year"].astype(str)
@@ -98,7 +101,7 @@ def normalize_transaction_df(df, transaction_type):
             f"{transaction_type.title()} file must include columns: date, description, category, amount"
         )
 
-    df = df[list(required)].copy()
+    df = df[["date", "description", "category", "amount"]].copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
     df = df.dropna(subset=["date", "amount"])
@@ -131,6 +134,28 @@ def save_transactions_to_db(df, file_name):
 
     df.to_sql("transactions", conn, if_exists="append", index=False)
     conn.close()
+
+
+def load_sample_data():
+    budget_df = pd.read_csv("data/budget_2025_sample.csv")
+    deposits_df = pd.read_csv("data/deposits_2025_sample.csv")
+    invoices_df = pd.read_csv("data/invoices_2025_sample.csv")
+
+    budget_df = normalize_budget_df(budget_df)
+    deposits_df = normalize_transaction_df(deposits_df, "deposit")
+    invoices_df = normalize_transaction_df(invoices_df, "invoice")
+
+    save_budget_to_db(budget_df)
+    save_transactions_to_db(deposits_df, "deposits_2025_sample.csv")
+    save_transactions_to_db(invoices_df, "invoices_2025_sample.csv")
+
+
+def has_data():
+    conn = get_conn()
+    budget_count = pd.read_sql_query("SELECT COUNT(*) AS count FROM budget", conn).iloc[0]["count"]
+    transaction_count = pd.read_sql_query("SELECT COUNT(*) AS count FROM transactions", conn).iloc[0]["count"]
+    conn.close()
+    return budget_count > 0 and transaction_count > 0
 
 
 # -----------------------------
@@ -339,16 +364,65 @@ def create_pdf_report(title, report_text):
 
 
 # -----------------------------
+# Welcome page
+# -----------------------------
+def show_welcome_page():
+    st.title("Welcome to the Retail Finance Chatbot")
+    st.subheader("Analyze retail financial data and generate AI-powered insights")
+
+    st.markdown("""
+    ### What this app does
+    - Upload budget, deposit, and invoice files
+    - Generate monthly financial summaries
+    - Ask AI questions about your financial performance
+    - Download AI-generated reports as PDF
+
+    ### How to use it
+    1. Click **Launch App**
+    2. Go to **Upload Data**
+    3. Upload your budget, deposit, and invoice files or load the sample data
+    4. Open **Monthly Report** to generate a summary
+    5. Use **Chatbot** to ask financial questions
+
+    ### Accepted file types
+    - CSV
+    - XLSX
+    """)
+
+    if st.button("Launch App"):
+        st.session_state.show_main_app = True
+        st.rerun()
+
+
+# -----------------------------
 # App UI
 # -----------------------------
 init_db()
 
-st.title("Retail Finance Chatbot")
-st.caption("Upload budget, invoice, and deposit files, then ask financial questions.")
+if not st.session_state.show_main_app:
+    show_welcome_page()
+    st.stop()
+
+top_col1, top_col2 = st.columns([6, 1])
+with top_col1:
+    st.title("Retail Finance Chatbot")
+    st.caption("Upload budget, invoice, and deposit files, then ask financial questions.")
+with top_col2:
+    if st.button("Back to Welcome"):
+        st.session_state.show_main_app = False
+        st.rerun()
 
 tab1, tab2, tab3 = st.tabs(["Upload Data", "Monthly Report", "Chatbot"])
 
 with tab1:
+    st.subheader("Quick Start")
+    if st.button("Load Sample Data"):
+        try:
+            load_sample_data()
+            st.success("Sample data loaded successfully.")
+        except Exception as e:
+            st.error(f"Could not load sample data: {e}")
+
     st.subheader("1. Upload Yearly Budget")
     budget_file = st.file_uploader("Upload budget CSV/XLSX", type=["csv", "xlsx"], key="budget")
     if budget_file is not None:
@@ -387,73 +461,84 @@ with tab1:
 
 with tab2:
     st.subheader("Generate Monthly Report")
-    col1, col2 = st.columns(2)
-    with col1:
-        month = st.number_input("Month (1-12)", min_value=1, max_value=12, value=datetime.now().month)
-    with col2:
-        year = st.number_input("Year", min_value=2020, max_value=2100, value=datetime.now().year)
 
-    if st.button("Generate Report"):
-        try:
-            result = build_financial_summary(month, year)
-            st.markdown(f"### {result['month_name']} {result['year']} Financial Summary")
-            st.write(f"**Revenue:** ${result['revenue']:,.2f}")
-            st.write(f"**Expenses:** ${result['expenses']:,.2f}")
-            st.write(f"**Profit:** ${result['profit']:,.2f}")
-            st.write(f"**Budgeted Expenses:** ${result['budget_total']:,.2f}")
-            st.write(f"**Budget Variance (Budget - Actual Expenses):** ${result['variance']:,.2f}")
+    if not has_data():
+        st.warning("Please upload your files or load the sample data first.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            month = st.number_input("Month (1-12)", min_value=1, max_value=12, value=datetime.now().month)
+        with col2:
+            year = st.number_input("Year", min_value=2020, max_value=2100, value=datetime.now().year)
 
-            st.markdown("#### Top Expense Categories")
-            if result["top_expenses_df"].empty:
-                st.info("No invoice data available for this month.")
-            else:
-                st.dataframe(result["top_expenses_df"])
+        if st.button("Generate Report"):
+            try:
+                result = build_financial_summary(month, year)
+                st.markdown(f"### {result['month_name']} {result['year']} Financial Summary")
+                st.write(f"**Revenue:** ${result['revenue']:,.2f}")
+                st.write(f"**Expenses:** ${result['expenses']:,.2f}")
+                st.write(f"**Profit:** ${result['profit']:,.2f}")
+                st.write(f"**Budgeted Expenses:** ${result['budget_total']:,.2f}")
+                st.write(f"**Budget Variance (Budget - Actual Expenses):** ${result['variance']:,.2f}")
 
-            recent_reports = get_recent_reports(limit=3)
-            recent_reports_text = ""
-            if not recent_reports.empty:
-                for _, row in recent_reports.iterrows():
-                    recent_reports_text += f"\n[{row['report_month']} {row['report_year']}]\n{row['report_text']}\n"
+                st.markdown("#### Top Expense Categories")
+                if result["top_expenses_df"].empty:
+                    st.info("No invoice data available for this month.")
+                else:
+                    st.dataframe(result["top_expenses_df"])
 
-            prompt = f"Create a professional monthly financial report for {result['month_name']} {result['year']}."
-            report_text = ask_openai(prompt, result["summary_text"], recent_reports_text)
+                recent_reports = get_recent_reports(limit=3)
+                recent_reports_text = ""
+                if not recent_reports.empty:
+                    for _, row in recent_reports.iterrows():
+                        recent_reports_text += f"\n[{row['report_month']} {row['report_year']}]\n{row['report_text']}\n"
 
-            st.markdown("#### AI-Generated Report")
-            st.write(report_text)
+                prompt = f"Create a professional monthly financial report for {result['month_name']} {result['year']}."
 
-            pdf_title = f"{result['month_name']} {result['year']} Financial Report"
-            pdf_bytes = create_pdf_report(pdf_title, report_text)
+                with st.spinner("Generating AI report..."):
+                    report_text = ask_openai(prompt, result["summary_text"], recent_reports_text)
 
-            st.download_button(
-                label="Download Report as PDF",
-                data=pdf_bytes,
-                file_name=f"{result['month_name']}_{result['year']}_report.pdf",
-                mime="application/pdf"
-            )
+                st.markdown("#### AI-Generated Report")
+                st.write(report_text)
 
-            save_report(result["month_name"], result["year"], report_text)
-            st.success("Report generated and saved to memory.")
-        except Exception as e:
-            st.error(f"Could not generate report: {e}")
+                pdf_title = f"{result['month_name']} {result['year']} Financial Report"
+                pdf_bytes = create_pdf_report(pdf_title, report_text)
+
+                st.download_button(
+                    label="Download Report as PDF",
+                    data=pdf_bytes,
+                    file_name=f"{result['month_name']}_{result['year']}_report.pdf",
+                    mime="application/pdf"
+                )
+
+                save_report(result["month_name"], result["year"], report_text)
+                st.success("Report generated and saved to memory.")
+            except Exception as e:
+                st.error(f"Could not generate report: {e}")
 
 with tab3:
     st.subheader("Ask the Chatbot")
-    month = st.number_input("Chat month (1-12)", min_value=1, max_value=12, value=datetime.now().month, key="chat_month")
-    year = st.number_input("Chat year", min_value=2020, max_value=2100, value=datetime.now().year, key="chat_year")
-    user_question = st.text_area("Ask a question", placeholder="Example: Are we over budget this month?")
 
-    if st.button("Ask"):
-        try:
-            result = build_financial_summary(month, year)
-            recent_reports = get_recent_reports(limit=3)
-            recent_reports_text = ""
-            if not recent_reports.empty:
-                for _, row in recent_reports.iterrows():
-                    recent_reports_text += f"\n[{row['report_month']} {row['report_year']}]\n{row['report_text']}\n"
+    if not has_data():
+        st.warning("Please upload your files or load the sample data first.")
+    else:
+        month = st.number_input("Chat month (1-12)", min_value=1, max_value=12, value=datetime.now().month, key="chat_month")
+        year = st.number_input("Chat year", min_value=2020, max_value=2100, value=datetime.now().year, key="chat_year")
+        user_question = st.text_area("Ask a question", placeholder="Example: Are we over budget this month?")
 
-            answer = ask_openai(user_question, result["summary_text"], recent_reports_text)
+        if st.button("Ask"):
+            try:
+                result = build_financial_summary(month, year)
+                recent_reports = get_recent_reports(limit=3)
+                recent_reports_text = ""
+                if not recent_reports.empty:
+                    for _, row in recent_reports.iterrows():
+                        recent_reports_text += f"\n[{row['report_month']} {row['report_year']}]\n{row['report_text']}\n"
 
-            st.markdown("#### Answer")
-            st.write(answer)
-        except Exception as e:
-            st.error(f"Chat failed: {e}")
+                with st.spinner("Analyzing your question..."):
+                    answer = ask_openai(user_question, result["summary_text"], recent_reports_text)
+
+                st.markdown("#### Answer")
+                st.write(answer)
+            except Exception as e:
+                st.error(f"Chat failed: {e}")
